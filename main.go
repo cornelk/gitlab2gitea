@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/spf13/cobra"
@@ -13,8 +14,12 @@ import (
 type migrator struct {
 	cmd    *cobra.Command
 	logger *zap.Logger
-	gitl   *gitlab.Client
-	giti   *gitea.Client
+
+	gitlab          *gitlab.Client
+	gitlabProjectID int
+
+	gitea          *gitea.Client
+	giteaProjectID int64
 }
 
 func main() {
@@ -25,10 +30,14 @@ func main() {
 	}
 
 	rootCmd.Flags().String("config", "", "config file (default is $HOME/.gitlab2gitea.yaml)")
+
 	rootCmd.Flags().String("gitlabtoken", "", "token for GitLab API access")
 	rootCmd.Flags().String("gitlabserver", "https://gitlab.com/", "GitLab server URL with a trailing slash")
+	rootCmd.Flags().String("gitlabproject", "", "GitLab project name, use namespace/name")
+
 	rootCmd.Flags().String("giteatoken", "", "token for Gitea API access")
 	rootCmd.Flags().String("giteaserver", "", "Gitea server URL")
+	rootCmd.Flags().String("giteaproject", "", "Gitea project name, use namespace/name. defaults to GitLab project name")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Printf("ERROR: %v\n", err)
@@ -76,9 +85,14 @@ func newMigrator(cmd *cobra.Command) *migrator {
 		logger: logger,
 	}
 
-	m.gitl = m.gitlabClient()
-	m.giti = m.giteaClient()
+	m.gitlab = m.gitlabClient()
+	m.gitea = m.giteaClient()
 	return m
+}
+
+func (m *migrator) missingParameter(msg string) {
+	_ = m.cmd.Help()
+	m.logger.Fatal(msg)
 }
 
 // gitlabClient returns a new Gitlab client with the given command line
@@ -86,23 +100,34 @@ func newMigrator(cmd *cobra.Command) *migrator {
 func (m *migrator) gitlabClient() *gitlab.Client {
 	gitlabToken, _ := m.cmd.Flags().GetString("gitlabtoken")
 	if gitlabToken == "" {
-		m.logger.Fatal("No GitLab token given")
+		m.missingParameter("No GitLab token given")
 	}
 
-	gitl := gitlab.NewClient(nil, gitlabToken)
+	client := gitlab.NewClient(nil, gitlabToken)
 	gitlabServer, _ := m.cmd.Flags().GetString("gitlabserver")
 	if gitlabServer != "" {
-		if err := gitl.SetBaseURL(gitlabServer); err != nil {
+		if err := client.SetBaseURL(gitlabServer); err != nil {
 			m.logger.Fatal("Setting GitLab server URL failed", zap.Error(err))
 		}
 	}
 
 	// get the user status to check that the auth and connection works
-	_, _, err := gitl.Users.CurrentUserStatus()
+	_, _, err := client.Users.CurrentUserStatus()
 	if err != nil {
 		m.logger.Fatal("Getting GitLab user status failed", zap.Error(err))
 	}
-	return gitl
+
+	gitlabProject, _ := m.cmd.Flags().GetString("gitlabproject")
+	if gitlabProject == "" {
+		m.missingParameter("No GitLab project given")
+	}
+	project, _, err := client.Projects.GetProject(gitlabProject, nil)
+	if err != nil {
+		m.logger.Fatal("Getting GitLab project info failed", zap.Error(err))
+	}
+	m.gitlabProjectID = project.ID
+
+	return client
 }
 
 // giteaClient returns a new Gitea client with the given command line
@@ -110,22 +135,37 @@ func (m *migrator) gitlabClient() *gitlab.Client {
 func (m *migrator) giteaClient() *gitea.Client {
 	giteaServer, _ := m.cmd.Flags().GetString("giteaserver")
 	if giteaServer == "" {
-		m.logger.Fatal("No Gitea server URL given")
+		m.missingParameter("No Gitea server URL given")
 	}
 
 	giteaToken, _ := m.cmd.Flags().GetString("giteatoken")
 	if giteaToken == "" {
-		m.logger.Fatal("No Gitea token given")
+		m.missingParameter("No Gitea token given")
 	}
 
-	giti := gitea.NewClient(giteaServer, giteaToken)
+	client := gitea.NewClient(giteaServer, giteaToken)
 
 	// get the user info to check that the auth and connection works
-	_, err := giti.GetMyUserInfo()
+	_, err := client.GetMyUserInfo()
 	if err != nil {
 		m.logger.Fatal("Getting Gitea user info failed", zap.Error(err))
 	}
-	return giti
+
+	giteaProject, _ := m.cmd.Flags().GetString("giteaproject")
+	if giteaProject == "" {
+		giteaProject, _ = m.cmd.Flags().GetString("gitlabproject")
+	}
+	sl := strings.Split(giteaProject, "/")
+	if len(sl) != 2 {
+		m.missingParameter("Gitea project name uses wrong format")
+	}
+	repo, err := client.GetRepo(sl[0], sl[1])
+	if err != nil {
+		m.logger.Fatal("Getting Gitea repo info failed", zap.Error(err))
+	}
+	m.giteaProjectID = repo.ID
+
+	return client
 }
 
 func (m *migrator) migrateProject() {
