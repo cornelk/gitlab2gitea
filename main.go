@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/spf13/cobra"
@@ -20,6 +21,8 @@ type migrator struct {
 
 	gitea          *gitea.Client
 	giteaProjectID int64
+	giteaRepo      string
+	giteaOwner     string
 }
 
 func main() {
@@ -57,7 +60,22 @@ func startMigration(cmd *cobra.Command, args []string) {
 	_ = viper.ReadInConfig()
 
 	m := newMigrator(cmd)
-	m.migrateProject()
+	if err := m.migrateProject(); err != nil {
+		m.logger.Fatal("Migrating the project failed", zap.Error(err))
+	}
+	m.logger.Info("Migration finished successfully")
+}
+
+func newMigrator(cmd *cobra.Command) *migrator {
+	logger := logger(cmd)
+	m := &migrator{
+		cmd:    cmd,
+		logger: logger,
+	}
+
+	m.gitlab = m.gitlabClient()
+	m.gitea = m.giteaClient()
+	return m
 }
 
 func logger(cmd *cobra.Command) *zap.Logger {
@@ -76,18 +94,6 @@ func logger(cmd *cobra.Command) *zap.Logger {
 
 	log, _ := config.Build()
 	return log
-}
-
-func newMigrator(cmd *cobra.Command) *migrator {
-	logger := logger(cmd)
-	m := &migrator{
-		cmd:    cmd,
-		logger: logger,
-	}
-
-	m.gitlab = m.gitlabClient()
-	m.gitea = m.giteaClient()
-	return m
 }
 
 func (m *migrator) missingParameter(msg string) {
@@ -159,7 +165,10 @@ func (m *migrator) giteaClient() *gitea.Client {
 	if len(sl) != 2 {
 		m.missingParameter("Gitea project name uses wrong format")
 	}
-	repo, err := client.GetRepo(sl[0], sl[1])
+	m.giteaOwner = sl[0]
+	m.giteaRepo = sl[1]
+
+	repo, err := client.GetRepo(m.giteaOwner, m.giteaRepo)
 	if err != nil {
 		m.logger.Fatal("Getting Gitea repo info failed", zap.Error(err))
 	}
@@ -168,6 +177,170 @@ func (m *migrator) giteaClient() *gitea.Client {
 	return client
 }
 
-func (m *migrator) migrateProject() {
-	// TODO implement
+func (m *migrator) migrateProject() error {
+	if err := m.migrateMilestones(); err != nil {
+		return err
+	}
+	if err := m.migrateLables(); err != nil {
+		return err
+	}
+	if err := m.migrateIssues(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *migrator) migrateMilestones() error {
+	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for _, milestone := range giteaMilestones {
+		existing[milestone.Title] = struct{}{}
+	}
+
+	state := "active"
+	gitlabMilestones, _, err := m.gitlab.Milestones.ListMilestones(m.gitlabProjectID,
+		&gitlab.ListMilestonesOptions{State: &state}, nil)
+	if err != nil {
+		return err
+	}
+	for _, milestone := range gitlabMilestones {
+		if _, ok := existing[milestone.Title]; ok {
+			continue
+		}
+
+		o := gitea.CreateMilestoneOption{
+			Title:       milestone.Title,
+			Description: milestone.Description,
+			Deadline:    (*time.Time)(milestone.DueDate),
+		}
+		if _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
+			return err
+		}
+		m.logger.Info("Created milestone",
+			zap.String("title", o.Title),
+			zap.Time("deadline", *o.Deadline),
+		)
+	}
+	return nil
+}
+
+func (m *migrator) migrateLables() error {
+	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for _, lable := range giteaLabels {
+		existing[lable.Name] = struct{}{}
+	}
+
+	gitlabLables, _, err := m.gitlab.Labels.ListLabels(m.gitlabProjectID, nil, nil)
+	if err != nil {
+		return err
+	}
+	for _, lable := range gitlabLables {
+		if _, ok := existing[lable.Name]; ok {
+			continue
+		}
+
+		o := gitea.CreateLabelOption{
+			Name:        lable.Name,
+			Description: lable.Description,
+			Color:       lable.Color,
+		}
+		if _, err = m.gitea.CreateLabel(m.giteaOwner, m.giteaRepo, o); err != nil {
+			return err
+		}
+		m.logger.Info("Created label",
+			zap.String("name", o.Name),
+			zap.String("color", o.Color),
+		)
+	}
+	return nil
+}
+
+func (m *migrator) migrateIssues() error {
+	opt := gitea.ListIssueOption{
+		State: "open",
+	}
+	giteaIssues, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for _, issue := range giteaIssues {
+		existing[issue.Title] = struct{}{}
+	}
+
+	giteaMilestones, err := m.giteaMilestones()
+	if err != nil {
+		return err
+	}
+	giteaLabels, err := m.giteaLabels()
+	if err != nil {
+		return err
+	}
+
+	gitlabIssues, _, err := m.gitlab.Issues.ListProjectIssues(m.gitlabProjectID, nil, nil)
+	if err != nil {
+		return err
+	}
+	for _, issue := range gitlabIssues {
+		if _, ok := existing[issue.Title]; ok {
+			continue
+		}
+
+		o := gitea.CreateIssueOption{
+			Title:    issue.Title,
+			Body:     issue.Description,
+			Deadline: (*time.Time)(issue.DueDate),
+		}
+
+		milestone, ok := giteaMilestones[issue.Milestone.Title]
+		if ok {
+			o.Milestone = milestone.ID
+		}
+
+		for _, l := range issue.Labels {
+			label, ok := giteaLabels[l]
+			if ok {
+				o.Labels = append(o.Labels, label.ID)
+			}
+		}
+
+		if _, err = m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
+			return err
+		}
+		m.logger.Info("Created issue",
+			zap.String("title", o.Title),
+		)
+	}
+	return nil
+}
+
+func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
+	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo)
+	if err != nil {
+		return nil, err
+	}
+	milestones := map[string]*gitea.Milestone{}
+	for _, milestone := range giteaMilestones {
+		milestones[milestone.Title] = milestone
+	}
+	return milestones, nil
+}
+
+func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
+	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo)
+	if err != nil {
+		return nil, err
+	}
+	labels := map[string]*gitea.Label{}
+	for _, label := range giteaLabels {
+		labels[label.Name] = label
+	}
+	return labels, nil
 }
