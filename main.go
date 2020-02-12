@@ -178,12 +178,15 @@ func (m *migrator) giteaClient() *gitea.Client {
 }
 
 func (m *migrator) migrateProject() error {
+	m.logger.Info("Migrating milestones")
 	if err := m.migrateMilestones(); err != nil {
 		return err
 	}
-	if err := m.migrateLables(); err != nil {
+	m.logger.Info("Migrating labels")
+	if err := m.migrateLabels(); err != nil {
 		return err
 	}
+	m.logger.Info("Migrating issues")
 	if err := m.migrateIssues(); err != nil {
 		return err
 	}
@@ -191,90 +194,93 @@ func (m *migrator) migrateProject() error {
 }
 
 func (m *migrator) migrateMilestones() error {
-	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo)
+	existing, err := m.giteaMilestones()
 	if err != nil {
 		return err
-	}
-	existing := map[string]struct{}{}
-	for _, milestone := range giteaMilestones {
-		existing[milestone.Title] = struct{}{}
 	}
 
 	state := "active"
-	gitlabMilestones, _, err := m.gitlab.Milestones.ListMilestones(m.gitlabProjectID,
-		&gitlab.ListMilestonesOptions{State: &state}, nil)
-	if err != nil {
-		return err
-	}
-	for _, milestone := range gitlabMilestones {
-		if _, ok := existing[milestone.Title]; ok {
-			continue
+	for page := 1; ; page++ {
+		opt := &gitlab.ListMilestonesOptions{
+			ListOptions: gitlab.ListOptions{
+				Page:    page,
+				PerPage: 100,
+			},
+			State: &state,
 		}
 
-		o := gitea.CreateMilestoneOption{
-			Title:       milestone.Title,
-			Description: milestone.Description,
-			Deadline:    (*time.Time)(milestone.DueDate),
-		}
-		if _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
+		gitlabMilestones, _, err := m.gitlab.Milestones.ListMilestones(m.gitlabProjectID, opt, nil)
+		if err != nil {
 			return err
 		}
-		m.logger.Info("Created milestone",
-			zap.String("title", o.Title),
-			zap.Time("deadline", *o.Deadline),
-		)
+		if len(gitlabMilestones) == 0 {
+			return nil
+		}
+
+		for _, milestone := range gitlabMilestones {
+			if _, ok := existing[milestone.Title]; ok {
+				continue
+			}
+
+			o := gitea.CreateMilestoneOption{
+				Title:       milestone.Title,
+				Description: milestone.Description,
+				Deadline:    (*time.Time)(milestone.DueDate),
+			}
+			if _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
+				return err
+			}
+			m.logger.Info("Created milestone", zap.String("title", o.Title))
+		}
 	}
-	return nil
 }
 
-func (m *migrator) migrateLables() error {
-	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo)
+func (m *migrator) migrateLabels() error {
+	existing, err := m.giteaLabels()
 	if err != nil {
 		return err
 	}
-	existing := map[string]struct{}{}
-	for _, lable := range giteaLabels {
-		existing[lable.Name] = struct{}{}
-	}
 
-	gitlabLables, _, err := m.gitlab.Labels.ListLabels(m.gitlabProjectID, nil, nil)
-	if err != nil {
-		return err
-	}
-	for _, lable := range gitlabLables {
-		if _, ok := existing[lable.Name]; ok {
-			continue
+	for page := 1; ; page++ {
+		opt := &gitlab.ListLabelsOptions{
+			Page:    page,
+			PerPage: 100,
 		}
 
-		o := gitea.CreateLabelOption{
-			Name:        lable.Name,
-			Description: lable.Description,
-			Color:       lable.Color,
-		}
-		if _, err = m.gitea.CreateLabel(m.giteaOwner, m.giteaRepo, o); err != nil {
+		gitlabLabels, _, err := m.gitlab.Labels.ListLabels(m.gitlabProjectID, opt, nil)
+		if err != nil {
 			return err
 		}
-		m.logger.Info("Created label",
-			zap.String("name", o.Name),
-			zap.String("color", o.Color),
-		)
+		if len(gitlabLabels) == 0 {
+			return nil
+		}
+
+		for _, label := range gitlabLabels {
+			if _, ok := existing[label.Name]; ok {
+				continue
+			}
+
+			o := gitea.CreateLabelOption{
+				Name:        label.Name,
+				Description: label.Description,
+				Color:       label.Color,
+			}
+			if _, err = m.gitea.CreateLabel(m.giteaOwner, m.giteaRepo, o); err != nil {
+				return err
+			}
+			m.logger.Info("Created label",
+				zap.String("name", o.Name),
+				zap.String("color", o.Color),
+			)
+		}
 	}
-	return nil
 }
 
 func (m *migrator) migrateIssues() error {
-	opt := gitea.ListIssueOption{
-		State: "open",
-	}
-	giteaIssues, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
+	giteaIssues, err := m.giteaIssues()
 	if err != nil {
 		return err
 	}
-	existing := map[string]struct{}{}
-	for _, issue := range giteaIssues {
-		existing[issue.Title] = struct{}{}
-	}
-
 	giteaMilestones, err := m.giteaMilestones()
 	if err != nil {
 		return err
@@ -284,41 +290,82 @@ func (m *migrator) migrateIssues() error {
 		return err
 	}
 
-	gitlabIssues, _, err := m.gitlab.Issues.ListProjectIssues(m.gitlabProjectID, nil, nil)
-	if err != nil {
-		return err
-	}
-	for _, issue := range gitlabIssues {
-		if _, ok := existing[issue.Title]; ok {
-			continue
+	state := "opened"
+	for page := 1; ; page++ {
+		opt := &gitlab.ListProjectIssuesOptions{
+			ListOptions: gitlab.ListOptions{
+				Page:    page,
+				PerPage: 100,
+			},
+			State: &state,
 		}
 
-		o := gitea.CreateIssueOption{
-			Title:    issue.Title,
-			Body:     issue.Description,
-			Deadline: (*time.Time)(issue.DueDate),
-		}
-
-		milestone, ok := giteaMilestones[issue.Milestone.Title]
-		if ok {
-			o.Milestone = milestone.ID
-		}
-
-		for _, l := range issue.Labels {
-			label, ok := giteaLabels[l]
-			if ok {
-				o.Labels = append(o.Labels, label.ID)
-			}
-		}
-
-		if _, err = m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
+		gitlabIssues, _, err := m.gitlab.Issues.ListProjectIssues(m.gitlabProjectID, opt, nil)
+		if err != nil {
 			return err
 		}
-		m.logger.Info("Created issue",
-			zap.String("title", o.Title),
-		)
+		if len(gitlabIssues) == 0 {
+			return nil
+		}
+
+		for _, issue := range gitlabIssues {
+			o := gitea.CreateIssueOption{
+				Title:    issue.Title,
+				Body:     issue.Description,
+				Deadline: (*time.Time)(issue.DueDate),
+			}
+
+			if issue.Milestone != nil {
+				milestone, ok := giteaMilestones[issue.Milestone.Title]
+				if ok {
+					o.Milestone = milestone.ID
+				} else {
+					m.logger.Error("Unknown milestone",
+						zap.String("milestone", issue.Milestone.Title),
+					)
+				}
+			}
+
+			for _, l := range issue.Labels {
+				label, ok := giteaLabels[l]
+				if ok {
+					o.Labels = append(o.Labels, label.ID)
+				} else {
+					m.logger.Error("Unknown label",
+						zap.String("label", l),
+					)
+				}
+			}
+
+			if issue, ok := giteaIssues[issue.Title]; ok {
+				editOptions := gitea.EditIssueOption{
+					Title:     o.Title,
+					Body:      &o.Body,
+					Milestone: &o.Milestone,
+					Deadline:  o.Deadline,
+				}
+				if _, err = m.gitea.EditIssue(m.giteaOwner, m.giteaRepo, issue.Index, editOptions); err != nil {
+					return err
+				}
+				labelOptions := gitea.IssueLabelsOption{
+					Labels: o.Labels,
+				}
+				if _, err = m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, issue.Index, labelOptions); err != nil {
+					return err
+				}
+				m.logger.Info("Updated issue",
+					zap.String("title", o.Title),
+				)
+			} else {
+				if _, err = m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
+					return err
+				}
+				m.logger.Info("Created issue",
+					zap.String("title", o.Title),
+				)
+			}
+		}
 	}
-	return nil
 }
 
 func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
@@ -343,4 +390,25 @@ func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
 		labels[label.Name] = label
 	}
 	return labels, nil
+}
+
+func (m *migrator) giteaIssues() (map[string]*gitea.Issue, error) {
+	issues := map[string]*gitea.Issue{}
+	for page := 1; ; page++ {
+		opt := gitea.ListIssueOption{
+			Page:  page,
+			State: "all",
+		}
+		giteaIssues, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
+		if err != nil {
+			return nil, err
+		}
+		if len(giteaIssues) == 0 {
+			return issues, nil
+		}
+
+		for _, issue := range giteaIssues {
+			issues[issue.Title] = issue
+		}
+	}
 }
