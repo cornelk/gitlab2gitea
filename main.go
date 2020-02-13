@@ -47,6 +47,7 @@ func main() {
 	}
 }
 
+// startMigration is the entry point for the command.
 func startMigration(cmd *cobra.Command, args []string) {
 	configFile, err := cmd.Flags().GetString("config")
 	if err == nil && configFile != "" { // enable ability to specify config file via flag
@@ -66,6 +67,8 @@ func startMigration(cmd *cobra.Command, args []string) {
 	m.logger.Info("Migration finished successfully")
 }
 
+// newMigrator returns a new creator object.
+// It also tests that Gitlab and gitea can be reached.
 func newMigrator(cmd *cobra.Command) *migrator {
 	logger := logger(cmd)
 	m := &migrator{
@@ -78,6 +81,7 @@ func newMigrator(cmd *cobra.Command) *migrator {
 	return m
 }
 
+// logger returns a new logger instance.
 func logger(cmd *cobra.Command) *zap.Logger {
 	config := zap.NewDevelopmentConfig()
 	config.Development = false
@@ -177,6 +181,7 @@ func (m *migrator) giteaClient() *gitea.Client {
 	return client
 }
 
+// migrateProject migrates all supported aspects of a project.
 func (m *migrator) migrateProject() error {
 	m.logger.Info("Migrating milestones")
 	if err := m.migrateMilestones(); err != nil {
@@ -193,6 +198,7 @@ func (m *migrator) migrateProject() error {
 	return nil
 }
 
+// migrateMilestones does the active milestones migration.
 func (m *migrator) migrateMilestones() error {
 	existing, err := m.giteaMilestones()
 	if err != nil {
@@ -235,6 +241,7 @@ func (m *migrator) migrateMilestones() error {
 	}
 }
 
+// migrateLabels migrates all labels.
 func (m *migrator) migrateLabels() error {
 	existing, err := m.giteaLabels()
 	if err != nil {
@@ -276,6 +283,7 @@ func (m *migrator) migrateLabels() error {
 	}
 }
 
+// migrateIssues migrates all open issues.
 func (m *migrator) migrateIssues() error {
 	giteaIssues, err := m.giteaIssues()
 	if err != nil {
@@ -309,65 +317,77 @@ func (m *migrator) migrateIssues() error {
 		}
 
 		for _, issue := range gitlabIssues {
-			o := gitea.CreateIssueOption{
-				Title:    issue.Title,
-				Body:     issue.Description,
-				Deadline: (*time.Time)(issue.DueDate),
-			}
-
-			if issue.Milestone != nil {
-				milestone, ok := giteaMilestones[issue.Milestone.Title]
-				if ok {
-					o.Milestone = milestone.ID
-				} else {
-					m.logger.Error("Unknown milestone",
-						zap.String("milestone", issue.Milestone.Title),
-					)
-				}
-			}
-
-			for _, l := range issue.Labels {
-				label, ok := giteaLabels[l]
-				if ok {
-					o.Labels = append(o.Labels, label.ID)
-				} else {
-					m.logger.Error("Unknown label",
-						zap.String("label", l),
-					)
-				}
-			}
-
-			if issue, ok := giteaIssues[issue.Title]; ok {
-				editOptions := gitea.EditIssueOption{
-					Title:     o.Title,
-					Body:      &o.Body,
-					Milestone: &o.Milestone,
-					Deadline:  o.Deadline,
-				}
-				if _, err = m.gitea.EditIssue(m.giteaOwner, m.giteaRepo, issue.Index, editOptions); err != nil {
-					return err
-				}
-				labelOptions := gitea.IssueLabelsOption{
-					Labels: o.Labels,
-				}
-				if _, err = m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, issue.Index, labelOptions); err != nil {
-					return err
-				}
-				m.logger.Info("Updated issue",
-					zap.String("title", o.Title),
-				)
-			} else {
-				if _, err = m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
-					return err
-				}
-				m.logger.Info("Created issue",
-					zap.String("title", o.Title),
-				)
+			if err = m.migrateIssue(issue, giteaMilestones, giteaLabels, giteaIssues); err != nil {
+				return err
 			}
 		}
 	}
 }
 
+// migrateIssue migrates a single issue.
+func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]*gitea.Milestone,
+	giteaLabels map[string]*gitea.Label, giteaIssues map[string]*gitea.Issue) error {
+	o := gitea.CreateIssueOption{
+		Title:    issue.Title,
+		Body:     issue.Description,
+		Deadline: (*time.Time)(issue.DueDate),
+	}
+
+	if issue.Milestone != nil {
+		milestone, ok := giteaMilestones[issue.Milestone.Title]
+		if ok {
+			o.Milestone = milestone.ID
+		} else {
+			m.logger.Error("Unknown milestone",
+				zap.String("milestone", issue.Milestone.Title),
+			)
+		}
+	}
+
+	for _, l := range issue.Labels {
+		label, ok := giteaLabels[l]
+		if ok {
+			o.Labels = append(o.Labels, label.ID)
+		} else {
+			m.logger.Error("Unknown label",
+				zap.String("label", l),
+			)
+		}
+	}
+
+	existing, ok := giteaIssues[issue.Title]
+	if !ok {
+		if _, err := m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
+			return err
+		}
+		m.logger.Info("Created issue",
+			zap.String("title", o.Title),
+		)
+		return nil
+	}
+
+	editOptions := gitea.EditIssueOption{
+		Title:     o.Title,
+		Body:      &o.Body,
+		Milestone: &o.Milestone,
+		Deadline:  o.Deadline,
+	}
+	if _, err := m.gitea.EditIssue(m.giteaOwner, m.giteaRepo, existing.Index, editOptions); err != nil {
+		return err
+	}
+	labelOptions := gitea.IssueLabelsOption{
+		Labels: o.Labels,
+	}
+	if _, err := m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, existing.Index, labelOptions); err != nil {
+		return err
+	}
+	m.logger.Info("Updated issue",
+		zap.String("title", o.Title),
+	)
+	return nil
+}
+
+// giteaMilestones returns a map of all gitea milestones.
 func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo)
 	if err != nil {
@@ -380,6 +400,7 @@ func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 	return milestones, nil
 }
 
+// giteaMilestones returns a map of all gitea labels.
 func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
 	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo)
 	if err != nil {
@@ -392,6 +413,7 @@ func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
 	return labels, nil
 }
 
+// giteaMilestones returns a map of all gitea issues.
 func (m *migrator) giteaIssues() (map[string]*gitea.Issue, error) {
 	issues := map[string]*gitea.Issue{}
 	for page := 1; ; page++ {
