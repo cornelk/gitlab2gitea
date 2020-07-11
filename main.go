@@ -113,16 +113,14 @@ func (m *migrator) gitlabClient() *gitlab.Client {
 		m.missingParameter("No GitLab token given")
 	}
 
-	client := gitlab.NewClient(nil, gitlabToken)
 	gitlabServer, _ := m.cmd.Flags().GetString("gitlabserver")
-	if gitlabServer != "" {
-		if err := client.SetBaseURL(gitlabServer); err != nil {
-			m.logger.Fatal("Setting GitLab server URL failed", zap.Error(err))
-		}
+	client, err := gitlab.NewClient(gitlabToken, gitlab.WithBaseURL(gitlabServer))
+	if err != nil {
+		m.logger.Fatal("Creating Gitlab client failed", zap.Error(err))
 	}
 
 	// get the user status to check that the auth and connection works
-	_, _, err := client.Users.CurrentUserStatus()
+	_, _, err = client.Users.CurrentUserStatus()
 	if err != nil {
 		m.logger.Fatal("Getting GitLab user status failed", zap.Error(err))
 	}
@@ -389,7 +387,10 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 
 // giteaMilestones returns a map of all gitea milestones.
 func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
-	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo)
+	opt := gitea.ListMilestoneOption{
+		State: "all",
+	}
+	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +403,8 @@ func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 
 // giteaMilestones returns a map of all gitea labels.
 func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
-	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo)
+	opt := gitea.ListLabelsOptions{}
+	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +420,9 @@ func (m *migrator) giteaIssues() (map[string]*gitea.Issue, error) {
 	issues := map[string]*gitea.Issue{}
 	for page := 1; ; page++ {
 		opt := gitea.ListIssueOption{
-			Page:  page,
+			ListOptions: gitea.ListOptions{
+				Page: page,
+			},
 			State: "all",
 		}
 		giteaIssues, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
