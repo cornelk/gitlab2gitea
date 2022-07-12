@@ -248,8 +248,10 @@ func (m *migrator) migrateLabels() error {
 
 	for page := 1; ; page++ {
 		opt := &gitlab.ListLabelsOptions{
-			Page:    page,
-			PerPage: 100,
+			ListOptions: gitlab.ListOptions{
+				Page:    page,
+				PerPage: 100,
+			},
 		}
 
 		gitlabLabels, _, err := m.gitlab.Labels.ListLabels(m.gitlabProjectID, opt, nil)
