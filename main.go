@@ -151,10 +151,13 @@ func (m *migrator) giteaClient() *gitea.Client {
 		m.missingParameter("No Gitea token given")
 	}
 
-	client := gitea.NewClient(giteaServer, giteaToken)
+	client, err := gitea.NewClient(giteaServer, gitea.SetToken(giteaToken))
+	if err != nil {
+		m.logger.Fatal("Creating Gitea failed", zap.Error(err))
+	}
 
 	// get the user info to check that the auth and connection works
-	_, err := client.GetMyUserInfo()
+	_, _, err = client.GetMyUserInfo()
 	if err != nil {
 		m.logger.Fatal("Getting Gitea user info failed", zap.Error(err))
 	}
@@ -170,7 +173,7 @@ func (m *migrator) giteaClient() *gitea.Client {
 	m.giteaOwner = sl[0]
 	m.giteaRepo = sl[1]
 
-	repo, err := client.GetRepo(m.giteaOwner, m.giteaRepo)
+	repo, _, err := client.GetRepo(m.giteaOwner, m.giteaRepo)
 	if err != nil {
 		m.logger.Fatal("Getting Gitea repo info failed", zap.Error(err))
 	}
@@ -231,7 +234,7 @@ func (m *migrator) migrateMilestones() error {
 				Description: milestone.Description,
 				Deadline:    (*time.Time)(milestone.DueDate),
 			}
-			if _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
+			if _, _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
 				return err
 			}
 			m.logger.Info("Created milestone", zap.String("title", o.Title))
@@ -272,7 +275,7 @@ func (m *migrator) migrateLabels() error {
 				Description: label.Description,
 				Color:       label.Color,
 			}
-			if _, err = m.gitea.CreateLabel(m.giteaOwner, m.giteaRepo, o); err != nil {
+			if _, _, err = m.gitea.CreateLabel(m.giteaOwner, m.giteaRepo, o); err != nil {
 				return err
 			}
 			m.logger.Info("Created label",
@@ -357,7 +360,7 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 
 	existing, ok := giteaIssues[issue.Title]
 	if !ok {
-		if _, err := m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
+		if _, _, err := m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
 			return err
 		}
 		m.logger.Info("Created issue",
@@ -372,13 +375,13 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 		Milestone: &o.Milestone,
 		Deadline:  o.Deadline,
 	}
-	if _, err := m.gitea.EditIssue(m.giteaOwner, m.giteaRepo, existing.Index, editOptions); err != nil {
+	if _, _, err := m.gitea.EditIssue(m.giteaOwner, m.giteaRepo, existing.Index, editOptions); err != nil {
 		return err
 	}
 	labelOptions := gitea.IssueLabelsOption{
 		Labels: o.Labels,
 	}
-	if _, err := m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, existing.Index, labelOptions); err != nil {
+	if _, _, err := m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, existing.Index, labelOptions); err != nil {
 		return err
 	}
 	m.logger.Info("Updated issue",
@@ -392,7 +395,7 @@ func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 	opt := gitea.ListMilestoneOption{
 		State: "all",
 	}
-	giteaMilestones, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo, opt)
+	giteaMilestones, _, err := m.gitea.ListRepoMilestones(m.giteaOwner, m.giteaRepo, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +409,7 @@ func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 // giteaMilestones returns a map of all gitea labels.
 func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
 	opt := gitea.ListLabelsOptions{}
-	giteaLabels, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo, opt)
+	giteaLabels, _, err := m.gitea.ListRepoLabels(m.giteaOwner, m.giteaRepo, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +430,7 @@ func (m *migrator) giteaIssues() (map[string]*gitea.Issue, error) {
 			},
 			State: "all",
 		}
-		giteaIssues, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
+		giteaIssues, _, err := m.gitea.ListRepoIssues(m.giteaOwner, m.giteaRepo, opt)
 		if err != nil {
 			return nil, err
 		}
