@@ -48,7 +48,7 @@ func main() {
 }
 
 // startMigration is the entry point for the command.
-func startMigration(cmd *cobra.Command, args []string) {
+func startMigration(cmd *cobra.Command, _ []string) {
 	configFile, err := cmd.Flags().GetString("config")
 	if err == nil && configFile != "" { // enable ability to specify config file via flag
 		viper.SetConfigFile(configFile)
@@ -186,15 +186,17 @@ func (m *migrator) giteaClient() *gitea.Client {
 func (m *migrator) migrateProject() error {
 	m.logger.Info("Migrating milestones")
 	if err := m.migrateMilestones(); err != nil {
-		return err
+		return fmt.Errorf("migrating milestones: %w", err)
 	}
+
 	m.logger.Info("Migrating labels")
 	if err := m.migrateLabels(); err != nil {
-		return err
+		return fmt.Errorf("migrating labels: %w", err)
 	}
+
 	m.logger.Info("Migrating issues")
 	if err := m.migrateIssues(); err != nil {
-		return err
+		return fmt.Errorf("migrating issues: %w", err)
 	}
 	return nil
 }
