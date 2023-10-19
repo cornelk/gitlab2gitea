@@ -1,6 +1,6 @@
 module github.com/cornelk/gitlab2gitea
 
-go 1.18
+go 1.21
 
 require (
 	code.gitea.io/sdk/gitea v0.16.0
