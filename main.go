@@ -1,20 +1,35 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"code.gitea.io/sdk/gitea"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
+	"github.com/alexflint/go-arg"
+	"github.com/cornelk/gotokit/env"
+	"github.com/cornelk/gotokit/log"
 	"github.com/xanzy/go-gitlab"
-	"go.uber.org/zap"
 )
 
+type arguments struct {
+	GitlabToken   string `arg:"--gitlabtoken,required" help:"token for GitLab API access"`
+	GitlabServer  string `arg:"--gitlabserver" help:"GitLab server URL with a trailing slash"`
+	GitlabProject string `arg:"--gitlabproject,required" help:"GitLab project name, use namespace/name"`
+	GiteaToken    string `arg:"--giteatoken,required" help:"token for Gitea API access"`
+	GiteaServer   string `arg:"--giteaserver,required" help:"Gitea server URL"`
+	GiteaProject  string `arg:"--giteaproject" help:"Gitea project name, use namespace/name. defaults to GitLab project name"`
+}
+
+func (arguments) Description() string {
+	return "Migrate labels, issues and milestones from GitLab to Gitea.\n"
+}
+
 type migrator struct {
-	cmd    *cobra.Command
-	logger *zap.Logger
+	args   arguments
+	logger *log.Logger
 
 	gitlab          *gitlab.Client
 	gitlabProjectID int
@@ -26,160 +41,139 @@ type migrator struct {
 }
 
 func main() {
-	rootCmd := &cobra.Command{
-		Use:   "gitlab2gitea",
-		Short: "Migrate labels, issues and milestones from GitLab to Gitea",
-		Run:   startMigration,
+	args, err := readArguments()
+	if err != nil {
+		fmt.Printf("Reading arguments failed: %s\n", err)
+		os.Exit(1)
 	}
 
-	rootCmd.Flags().String("config", "", "config file (default is $HOME/.gitlab2gitea.yaml)")
-
-	rootCmd.Flags().String("gitlabtoken", "", "token for GitLab API access")
-	rootCmd.Flags().String("gitlabserver", "https://gitlab.com/", "GitLab server URL with a trailing slash")
-	rootCmd.Flags().String("gitlabproject", "", "GitLab project name, use namespace/name")
-
-	rootCmd.Flags().String("giteatoken", "", "token for Gitea API access")
-	rootCmd.Flags().String("giteaserver", "", "Gitea server URL")
-	rootCmd.Flags().String("giteaproject", "", "Gitea project name, use namespace/name. defaults to GitLab project name")
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Printf("ERROR: %v\n", err)
+	logger, err := createLogger()
+	if err != nil {
+		fmt.Printf("Creating logger failed: %s\n", err)
+		os.Exit(1)
 	}
+
+	m, err := newMigrator(args, logger)
+	if err != nil {
+		logger.Fatal("Creating migrator failed", log.Err(err))
+	}
+
+	if err := m.migrateProject(); err != nil {
+		m.logger.Fatal("Migrating the project failed", log.Err(err))
+	}
+
+	m.logger.Info("Migration finished successfully")
 }
 
-// startMigration is the entry point for the command.
-func startMigration(cmd *cobra.Command, _ []string) {
-	configFile, err := cmd.Flags().GetString("config")
-	if err == nil && configFile != "" { // enable ability to specify config file via flag
-		viper.SetConfigFile(configFile)
+func readArguments() (arguments, error) {
+	var args arguments
+	parser, err := arg.NewParser(arg.Config{}, &args)
+	if err != nil {
+		return arguments{}, fmt.Errorf("creating argument parser: %w", err)
 	}
 
-	viper.SetConfigName(".gitlab2gitea") // name of config file (without extension)
-	viper.AddConfigPath("$HOME")         // adding home directory as first search path
-	viper.AutomaticEnv()                 // read in environment variables that match
+	if err = parser.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, arg.ErrHelp) || errors.Is(err, arg.ErrVersion) {
+			parser.WriteHelp(os.Stdout)
+			os.Exit(0)
+		}
 
-	_ = viper.ReadInConfig()
-
-	m := newMigrator(cmd)
-	if err := m.migrateProject(); err != nil {
-		m.logger.Fatal("Migrating the project failed", zap.Error(err))
+		return arguments{}, fmt.Errorf("parsing arguments: %w", err)
 	}
-	m.logger.Info("Migration finished successfully")
+
+	return args, nil
+}
+
+func createLogger() (*log.Logger, error) {
+	cfg, err := log.ConfigForEnv(env.Development)
+	if err != nil {
+		return nil, fmt.Errorf("initializing log config: %w", err)
+	}
+	cfg.JSONOutput = false
+	cfg.CallerInfo = false
+
+	logger, err := log.NewWithConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("initializing logger: %w", err)
+	}
+	return logger, nil
 }
 
 // newMigrator returns a new creator object.
 // It also tests that Gitlab and gitea can be reached.
-func newMigrator(cmd *cobra.Command) *migrator {
-	logger := logger(cmd)
+func newMigrator(args arguments, logger *log.Logger) (*migrator, error) {
 	m := &migrator{
-		cmd:    cmd,
+		args:   args,
 		logger: logger,
 	}
 
-	m.gitlab = m.gitlabClient()
-	m.gitea = m.giteaClient()
-	return m
-}
-
-// logger returns a new logger instance.
-func logger(cmd *cobra.Command) *zap.Logger {
-	config := zap.NewDevelopmentConfig()
-	config.Development = false
-	config.DisableCaller = true
-	config.DisableStacktrace = true
-
-	level := config.Level
-	verbose, _ := cmd.Flags().GetBool("verbose")
-	if verbose {
-		level.SetLevel(zap.DebugLevel)
-	} else {
-		level.SetLevel(zap.InfoLevel)
-	}
-
-	log, _ := config.Build()
-	return log
-}
-
-func (m *migrator) missingParameter(msg string) {
-	_ = m.cmd.Help()
-	m.logger.Fatal(msg)
-}
-
-// gitlabClient returns a new Gitlab client with the given command line
-// parameters.
-func (m *migrator) gitlabClient() *gitlab.Client {
-	gitlabToken, _ := m.cmd.Flags().GetString("gitlabtoken")
-	if gitlabToken == "" {
-		m.missingParameter("No GitLab token given")
-	}
-
-	gitlabServer, _ := m.cmd.Flags().GetString("gitlabserver")
-	client, err := gitlab.NewClient(gitlabToken, gitlab.WithBaseURL(gitlabServer))
+	var err error
+	m.gitlab, err = m.gitlabClient()
 	if err != nil {
-		m.logger.Fatal("Creating Gitlab client failed", zap.Error(err))
+		return nil, err
+	}
+
+	m.gitea, err = m.giteaClient()
+	if err != nil {
+		return nil, err
+	}
+
+	return m, nil
+}
+
+// gitlabClient returns a new Gitlab client with the given command line parameters.
+func (m *migrator) gitlabClient() (*gitlab.Client, error) {
+	client, err := gitlab.NewClient(m.args.GitlabToken, gitlab.WithBaseURL(m.args.GitlabServer))
+	if err != nil {
+		return nil, fmt.Errorf("creating Gitlab client: %w", err)
 	}
 
 	// get the user status to check that the auth and connection works
 	_, _, err = client.Users.CurrentUserStatus()
 	if err != nil {
-		m.logger.Fatal("Getting GitLab user status failed", zap.Error(err))
+		return nil, fmt.Errorf("getting GitLab user status: %w", err)
 	}
 
-	gitlabProject, _ := m.cmd.Flags().GetString("gitlabproject")
-	if gitlabProject == "" {
-		m.missingParameter("No GitLab project given")
-	}
-	project, _, err := client.Projects.GetProject(gitlabProject, nil)
+	project, _, err := client.Projects.GetProject(m.args.GitlabProject, nil)
 	if err != nil {
-		m.logger.Fatal("Getting GitLab project info failed", zap.Error(err))
+		return nil, fmt.Errorf("getting GitLab project info: %w", err)
 	}
 	m.gitlabProjectID = project.ID
 
-	return client
+	return client, nil
 }
 
-// giteaClient returns a new Gitea client with the given command line
-// parameters.
-func (m *migrator) giteaClient() *gitea.Client {
-	giteaServer, _ := m.cmd.Flags().GetString("giteaserver")
-	if giteaServer == "" {
-		m.missingParameter("No Gitea server URL given")
-	}
-
-	giteaToken, _ := m.cmd.Flags().GetString("giteatoken")
-	if giteaToken == "" {
-		m.missingParameter("No Gitea token given")
-	}
-
-	client, err := gitea.NewClient(giteaServer, gitea.SetToken(giteaToken))
+// giteaClient returns a new Gitea client with the given command line parameters.
+func (m *migrator) giteaClient() (*gitea.Client, error) {
+	client, err := gitea.NewClient(m.args.GiteaServer, gitea.SetToken(m.args.GiteaToken))
 	if err != nil {
-		m.logger.Fatal("Creating Gitea failed", zap.Error(err))
+		return nil, fmt.Errorf("creating Gitea client: %w", err)
 	}
 
 	// get the user info to check that the auth and connection works
 	_, _, err = client.GetMyUserInfo()
 	if err != nil {
-		m.logger.Fatal("Getting Gitea user info failed", zap.Error(err))
+		return nil, fmt.Errorf("getting Gitea user info: %w", err)
 	}
 
-	giteaProject, _ := m.cmd.Flags().GetString("giteaproject")
+	giteaProject := m.args.GiteaProject
 	if giteaProject == "" {
-		giteaProject, _ = m.cmd.Flags().GetString("gitlabproject")
+		giteaProject = m.args.GitlabProject
 	}
 	sl := strings.Split(giteaProject, "/")
 	if len(sl) != 2 {
-		m.missingParameter("Gitea project name uses wrong format")
+		return nil, errors.New("wrong format of Gitea project name")
 	}
 	m.giteaOwner = sl[0]
 	m.giteaRepo = sl[1]
 
 	repo, _, err := client.GetRepo(m.giteaOwner, m.giteaRepo)
 	if err != nil {
-		m.logger.Fatal("Getting Gitea repo info failed", zap.Error(err))
+		return nil, fmt.Errorf("getting Gitea repo info: %w", err)
 	}
 	m.giteaProjectID = repo.ID
 
-	return client
+	return client, nil
 }
 
 // migrateProject migrates all supported aspects of a project.
@@ -239,7 +233,7 @@ func (m *migrator) migrateMilestones() error {
 			if _, _, err = m.gitea.CreateMilestone(m.giteaOwner, m.giteaRepo, o); err != nil {
 				return err
 			}
-			m.logger.Info("Created milestone", zap.String("title", o.Title))
+			m.logger.Info("Created milestone", log.String("title", o.Title))
 		}
 	}
 }
@@ -281,8 +275,8 @@ func (m *migrator) migrateLabels() error {
 				return err
 			}
 			m.logger.Info("Created label",
-				zap.String("name", o.Name),
-				zap.String("color", o.Color),
+				log.String("name", o.Name),
+				log.String("color", o.Color),
 			)
 		}
 	}
@@ -343,9 +337,7 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 		if ok {
 			o.Milestone = milestone.ID
 		} else {
-			m.logger.Error("Unknown milestone",
-				zap.String("milestone", issue.Milestone.Title),
-			)
+			m.logger.Error("Unknown milestone", log.String("milestone", issue.Milestone.Title))
 		}
 	}
 
@@ -354,9 +346,7 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 		if ok {
 			o.Labels = append(o.Labels, label.ID)
 		} else {
-			m.logger.Error("Unknown label",
-				zap.String("label", l),
-			)
+			m.logger.Error("Unknown label", log.String("label", l))
 		}
 	}
 
@@ -365,9 +355,7 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 		if _, _, err := m.gitea.CreateIssue(m.giteaOwner, m.giteaRepo, o); err != nil {
 			return err
 		}
-		m.logger.Info("Created issue",
-			zap.String("title", o.Title),
-		)
+		m.logger.Info("Created issue", log.String("title", o.Title))
 		return nil
 	}
 
@@ -386,9 +374,8 @@ func (m *migrator) migrateIssue(issue *gitlab.Issue, giteaMilestones map[string]
 	if _, _, err := m.gitea.ReplaceIssueLabels(m.giteaOwner, m.giteaRepo, existing.Index, labelOptions); err != nil {
 		return err
 	}
-	m.logger.Info("Updated issue",
-		zap.String("title", o.Title),
-	)
+
+	m.logger.Info("Updated issue", log.String("title", o.Title))
 	return nil
 }
 
@@ -401,6 +388,7 @@ func (m *migrator) giteaMilestones() (map[string]*gitea.Milestone, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	milestones := map[string]*gitea.Milestone{}
 	for _, milestone := range giteaMilestones {
 		milestones[milestone.Title] = milestone
@@ -415,6 +403,7 @@ func (m *migrator) giteaLabels() (map[string]*gitea.Label, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	labels := map[string]*gitea.Label{}
 	for _, label := range giteaLabels {
 		labels[label.Name] = label
