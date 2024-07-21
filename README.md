@@ -12,11 +12,11 @@ It skips creation if an item already exists.
 
 ## Installation
 
-You need to have Golang installed, otherwise follow the guide at [https://golang.org/doc/install](https://golang.org/doc/install).
+```
+go install github.com/cornelk/gitlab2gitea@latest
+```
 
-```
-go get github.com/cornelk/gitlab2gitea
-```
+Installing the tool from source code needs to have a recent version of [Golang](https://go.dev/) installed.
 
 ## Usage
 
@@ -29,32 +29,22 @@ go get github.com/cornelk/gitlab2gitea
 ## Options
 
 ```
-Migrate labels, issues and milestones from GitLab to Gitea
+Migrate labels, issues and milestones from GitLab to Gitea.
 
-Usage:
-  gitlab2gitea [flags]
+Usage: gitlab2gitea --gitlabtoken GITLABTOKEN [--gitlabserver GITLABSERVER] --gitlabproject GITLABPROJECT --giteatoken GITEATOKEN --giteaserver GITEASERVER [--giteaproject GITEAPROJECT]
 
-Flags:
-      --config string          config file (default is $HOME/.gitlab2gitea.yaml)
-      --giteaproject string    Gitea project name, use namespace/name. defaults to GitLab project name
-      --giteaserver string     Gitea server URL
-      --giteatoken string      token for Gitea API access
-      --gitlabproject string   GitLab project name, use namespace/name
-      --gitlabserver string    GitLab server URL with a trailing slash (default "https://gitlab.com/")
-      --gitlabtoken string     token for GitLab API access
-  -h, --help                   help for gitlab2gitea
+Options:
+  --gitlabtoken GITLABTOKEN
+                         token for GitLab API access
+  --gitlabserver GITLABSERVER
+                         GitLab server URL with a trailing slash
+  --gitlabproject GITLABPROJECT
+                         GitLab project name, use namespace/name
+  --giteatoken GITEATOKEN
+                         token for Gitea API access
+  --giteaserver GITEASERVER
+                         Gitea server URL
+  --giteaproject GITEAPROJECT
+                         Gitea project name, use namespace/name. defaults to GitLab project name
+  --help, -h             display this help and exit
 ```
-
-## Golang SDK Documentations
-
-[GitLab](https://pkg.go.dev/github.com/xanzy/go-gitlab)
-
-[Gitea](https://pkg.go.dev/code.gitea.io/sdk/gitea)
-
-## Dependencies
-
-- [code.gitea.io/sdk/gitea](https://code.gitea.io/sdk/gitea) Gitea client
-- [github.com/spf13/cobra](https://github.com/spf13/cobra) command line handling
-- [github.com/spf13/viper](https://github.com/spf13/viper) configuration
-- [github.com/xanzy/go-gitlab](https://github.com/xanzy/go-gitlab) GitLab client
-- [go.uber.org/zap](https://go.uber.org/zap) logging
