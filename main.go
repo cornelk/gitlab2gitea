@@ -11,7 +11,7 @@ import (
 	"github.com/alexflint/go-arg"
 	"github.com/cornelk/gotokit/env"
 	"github.com/cornelk/gotokit/log"
-	"github.com/xanzy/go-gitlab"
+	"gitlab.com/gitlab-org/api/client-go"
 )
 
 type arguments struct {
